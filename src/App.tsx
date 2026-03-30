@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams, useSearchParams, Navigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Search, 
@@ -23,15 +23,101 @@ import {
   Menu,
   ShoppingBag,
   MessageCircle,
-  Tag
+  Tag,
+  LogOut,
+  User as UserIcon,
+  LogIn
 } from 'lucide-react';
 import { Listing, Category, Condition } from './types';
 import { INITIAL_LISTINGS } from './constants';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { auth, db } from './firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  updateProfile 
+} from 'firebase/auth';
+import { 
+  collection, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  setDoc,
+  getDocFromServer
+} from 'firebase/firestore';
+
+// --- Error Handling ---
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 // --- Components ---
 
 const Navbar = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      navigate('/');
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+  };
 
   return (
     <nav className="sticky top-0 z-50 bg-background/80 backdrop-blur-md border-b border-white/10 px-4 py-3">
@@ -52,6 +138,27 @@ const Navbar = () => {
             <PlusCircle size={18} />
             Продай
           </Link>
+          
+          {user ? (
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 text-sm font-medium text-text-muted">
+                <UserIcon size={16} />
+                <span>{user.displayName || user.email}</span>
+              </div>
+              <button 
+                onClick={handleLogout}
+                className="text-sm font-medium text-red-400 hover:text-red-300 transition-colors flex items-center gap-1"
+              >
+                <LogOut size={16} /> Изход
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-4">
+              <Link to="/login" className="text-sm font-medium hover:text-primary transition-colors">Вход</Link>
+              <Link to="/register" className="text-sm font-medium px-4 py-2 bg-white/5 rounded-full hover:bg-white/10 transition-all">Регистрация</Link>
+            </div>
+          )}
+          
           <Link to="/admin" className="text-sm font-medium text-text-muted hover:text-white transition-colors">Админ</Link>
         </div>
 
@@ -72,7 +179,22 @@ const Navbar = () => {
             <Link to="/sell" onClick={() => setIsMenuOpen(false)} className="text-lg font-medium text-primary flex items-center gap-2">
               <PlusCircle size={20} /> Продай техника
             </Link>
-            <Link to="/admin" onClick={() => setIsMenuOpen(false)} className="text-lg font-medium text-text-muted">Админ панел</Link>
+            
+            {user ? (
+              <>
+                <div className="text-sm text-text-muted border-t border-white/5 pt-4">
+                  Влезли сте като: {user.displayName || user.email}
+                </div>
+                <button onClick={() => { handleLogout(); setIsMenuOpen(false); }} className="text-lg font-medium text-red-400 text-left">Изход</button>
+              </>
+            ) : (
+              <>
+                <Link to="/login" onClick={() => setIsMenuOpen(false)} className="text-lg font-medium">Вход</Link>
+                <Link to="/register" onClick={() => setIsMenuOpen(false)} className="text-lg font-medium">Регистрация</Link>
+              </>
+            )}
+            
+            <Link to="/admin" onClick={() => setIsMenuOpen(false)} className="text-lg font-medium text-text-muted border-t border-white/5 pt-4">Админ панел</Link>
           </motion.div>
         )}
       </AnimatePresence>
@@ -124,6 +246,168 @@ const ListingCard = ({ listing }: { listing: Listing }) => {
       </Link>
     </motion.div>
   );
+};
+
+const LoginPage = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      navigate('/');
+    } catch (err: any) {
+      setError('Невалиден имейл или парола.');
+      console.error(err);
+    }
+  };
+
+  return (
+    <div className="max-w-md mx-auto px-4 py-20">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="bg-surface p-8 rounded-3xl border border-white/5 shadow-2xl"
+      >
+        <div className="flex justify-center mb-6">
+          <div className="w-16 h-16 bg-gradient-to-br from-primary to-secondary rounded-2xl flex items-center justify-center text-white font-bold text-3xl">VT</div>
+        </div>
+        <h1 className="text-3xl font-black text-center mb-2">Добре дошли</h1>
+        <p className="text-text-muted text-center mb-8 text-sm">Влезте в своя акаунт, за да продължите</p>
+        
+        {error && <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-3 rounded-xl text-sm mb-6 text-center">{error}</div>}
+        
+        <form onSubmit={handleLogin} className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-text-muted uppercase tracking-widest">Имейл</label>
+            <input 
+              required
+              type="email" 
+              className="w-full bg-background border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-text-muted uppercase tracking-widest">Парола</label>
+            <input 
+              required
+              type="password" 
+              className="w-full bg-background border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <button type="submit" className="w-full bg-primary text-white py-4 rounded-2xl font-bold text-lg hover:scale-[1.02] transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary/20">
+            <LogIn size={20} /> Вход
+          </button>
+        </form>
+        
+        <p className="text-center mt-8 text-sm text-text-muted">
+          Нямате акаунт? <Link to="/register" className="text-primary hover:underline">Регистрирайте се</Link>
+        </p>
+      </motion.div>
+    </div>
+  );
+};
+
+const RegisterPage = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await updateProfile(userCredential.user, { displayName });
+      
+      // Create user document in Firestore
+      const userRef = doc(db, 'users', userCredential.user.uid);
+      await setDoc(userRef, {
+        uid: userCredential.user.uid,
+        email: email,
+        displayName: displayName,
+        role: 'user'
+      });
+      
+      navigate('/');
+    } catch (err: any) {
+      setError('Грешка при регистрация. Моля, опитайте отново.');
+      console.error(err);
+    }
+  };
+
+  return (
+    <div className="max-w-md mx-auto px-4 py-20">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="bg-surface p-8 rounded-3xl border border-white/5 shadow-2xl"
+      >
+        <h1 className="text-3xl font-black text-center mb-2">Регистрация</h1>
+        <p className="text-text-muted text-center mb-8 text-sm">Създайте акаунт в VenTech</p>
+        
+        {error && <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-3 rounded-xl text-sm mb-6 text-center">{error}</div>}
+        
+        <form onSubmit={handleRegister} className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-text-muted uppercase tracking-widest">Име</label>
+            <input 
+              required
+              type="text" 
+              className="w-full bg-background border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-text-muted uppercase tracking-widest">Имейл</label>
+            <input 
+              required
+              type="email" 
+              className="w-full bg-background border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-text-muted uppercase tracking-widest">Парола</label>
+            <input 
+              required
+              type="password" 
+              className="w-full bg-background border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-primary"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <button type="submit" className="w-full bg-gradient-to-r from-primary to-secondary text-white py-4 rounded-2xl font-bold text-lg hover:scale-[1.02] transition-all shadow-lg shadow-primary/20">
+            Създай акаунт
+          </button>
+        </form>
+        
+        <p className="text-center mt-8 text-sm text-text-muted">
+          Вече имате акаунт? <Link to="/login" className="text-primary hover:underline">Влезте тук</Link>
+        </p>
+      </motion.div>
+    </div>
+  );
+};
+
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user, loading } = useAuth();
+  
+  if (loading) return <div className="p-20 text-center">Зареждане...</div>;
+  if (!user) return <Navigate to="/login" />;
+  
+  return <>{children}</>;
 };
 
 // --- Pages ---
@@ -399,8 +683,9 @@ const ListingDetailPage = ({ listings }: { listings: Listing[] }) => {
   );
 };
 
-const SellPage = ({ onAddListing }: { onAddListing: (l: Listing) => void }) => {
+const SellPage = ({ onAddListing }: { onAddListing: (l: Omit<Listing, 'id'>) => void }) => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [formData, setFormData] = useState({
     title: '',
     category: 'Phones' as Category,
@@ -413,8 +698,9 @@ const SellPage = ({ onAddListing }: { onAddListing: (l: Listing) => void }) => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const newListing: Listing = {
-      id: Math.random().toString(36).substr(2, 9),
+    if (!user) return;
+
+    const newListing: Omit<Listing, 'id'> = {
       title: formData.title,
       category: formData.category,
       price: parseFloat(formData.price),
@@ -424,7 +710,8 @@ const SellPage = ({ onAddListing }: { onAddListing: (l: Listing) => void }) => {
       description: formData.description,
       images: [`https://picsum.photos/seed/${formData.title}/800/600`],
       sellerContact: formData.contact,
-      isSold: false
+      isSold: false,
+      authorUid: user.uid
     };
     onAddListing(newListing);
     navigate('/listings');
@@ -646,52 +933,94 @@ const Footer = () => (
 // --- Main App ---
 
 export default function App() {
-  const [listings, setListings] = useState<Listing[]>(() => {
-    const saved = localStorage.getItem('ventech_listings');
-    return saved ? JSON.parse(saved) : INITIAL_LISTINGS;
-  });
+  const [listings, setListings] = useState<Listing[]>([]);
+  const [isAuthReady, setIsAuthReady] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem('ventech_listings', JSON.stringify(listings));
-  }, [listings]);
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. ");
+        }
+      }
+    };
+    testConnection();
 
-  const handleAddListing = (newListing: Listing) => {
-    setListings(prev => [newListing, ...prev]);
-  };
+    const q = query(collection(db, 'listings'), orderBy('date', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const newListings = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Listing[];
+      setListings(newListings);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'listings');
+    });
 
-  const handleDeleteListing = (id: string) => {
-    if (window.confirm('Сигурни ли сте, че искате да изтриете тази обява?')) {
-      setListings(prev => prev.filter(l => l.id !== id));
+    return () => unsubscribe();
+  }, []);
+
+  const handleAddListing = async (newListing: Omit<Listing, 'id'>) => {
+    try {
+      await addDoc(collection(db, 'listings'), newListing);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'listings');
     }
   };
 
-  const handleToggleSold = (id: string) => {
-    setListings(prev => prev.map(l => l.id === id ? { ...l, isSold: !l.isSold } : l));
+  const handleDeleteListing = async (id: string) => {
+    if (window.confirm('Сигурни ли сте, че искате да изтриете тази обява?')) {
+      try {
+        await deleteDoc(doc(db, 'listings', id));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `listings/${id}`);
+      }
+    }
+  };
+
+  const handleToggleSold = async (id: string) => {
+    const listing = listings.find(l => l.id === id);
+    if (!listing) return;
+    try {
+      await updateDoc(doc(db, 'listings', id), { isSold: !listing.isSold });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `listings/${id}`);
+    }
   };
 
   return (
-    <Router>
-      <div className="min-h-screen flex flex-col selection:bg-primary selection:text-white">
-        <Navbar />
-        
-        <main className="flex-1">
-          <Routes>
-            <Route path="/" element={<HomePage listings={listings} />} />
-            <Route path="/listings" element={<ListingsPage listings={listings} />} />
-            <Route path="/listing/:id" element={<ListingDetailPage listings={listings} />} />
-            <Route path="/sell" element={<SellPage onAddListing={handleAddListing} />} />
-            <Route path="/admin" element={
-              <AdminPage 
-                listings={listings} 
-                onDelete={handleDeleteListing} 
-                onToggleSold={handleToggleSold} 
-              />
-            } />
-          </Routes>
-        </main>
+    <AuthProvider>
+      <Router>
+        <div className="min-h-screen flex flex-col selection:bg-primary selection:text-white">
+          <Navbar />
+          
+          <main className="flex-1">
+            <Routes>
+              <Route path="/" element={<HomePage listings={listings} />} />
+              <Route path="/listings" element={<ListingsPage listings={listings} />} />
+              <Route path="/listing/:id" element={<ListingDetailPage listings={listings} />} />
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
+              <Route path="/sell" element={
+                <ProtectedRoute>
+                  <SellPage onAddListing={handleAddListing} />
+                </ProtectedRoute>
+              } />
+              <Route path="/admin" element={
+                <AdminPage 
+                  listings={listings} 
+                  onDelete={handleDeleteListing} 
+                  onToggleSold={handleToggleSold} 
+                />
+              } />
+            </Routes>
+          </main>
 
-        <Footer />
-      </div>
-    </Router>
+          <Footer />
+        </div>
+      </Router>
+    </AuthProvider>
   );
 }

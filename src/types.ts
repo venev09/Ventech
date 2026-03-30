@@ -18,4 +18,5 @@ export interface Listing {
   images: string[];
   sellerContact: string;
   isSold: boolean;
+  authorUid: string;
 }

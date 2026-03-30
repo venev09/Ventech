@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Listing": {
+      "title": "Listing",
+      "description": "A second-hand electronics listing.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique ID for the listing." },
+        "title": { "type": "string", "description": "Product title." },
+        "category": { "type": "string", "enum": ["Phones", "PlayStations", "Laptops"] },
+        "price": { "type": "number", "description": "Price in лв." },
+        "condition": { "type": "string", "enum": ["Excellent", "Good", "Fair"] },
+        "location": { "type": "string", "description": "City name." },
+        "date": { "type": "string", "format": "date", "description": "Post date." },
+        "description": { "type": "string", "description": "Product details." },
+        "images": { "type": "array", "items": { "type": "string" } },
+        "sellerContact": { "type": "string", "description": "Phone or WhatsApp." },
+        "isSold": { "type": "boolean", "description": "Whether the item is sold." },
+        "authorUid": { "type": "string", "description": "UID of the seller." }
+      },
+      "required": ["title", "category", "price", "condition", "location", "description", "images", "sellerContact", "authorUid"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile information.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "admin"] }
+      },
+      "required": ["uid", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/listings/{listingId}": {
+      "schema": "Listing",
+      "description": "Collection of electronics listings."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile data."
+    }
+  }
+}
